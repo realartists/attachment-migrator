@@ -318,7 +318,7 @@ class AttachmentMigrator {
                 srcHash = data?.sha1Sum() ?? ""
             }
             group.leave()
-            }.resume()
+        }.resume()
         
         group.enter()
         URLSession.shared.dataTask(with: srcURL!) { (data, response, err) in
@@ -328,7 +328,7 @@ class AttachmentMigrator {
                 dstHash = data?.sha1Sum() ?? ""
             }
             group.leave()
-            }.resume()
+        }.resume()
         
         group.wait()
         
