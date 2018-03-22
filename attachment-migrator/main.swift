@@ -277,6 +277,8 @@ SELECT \(table).ZIDENTIFIER,
             comments.append(c)
         }
         
+        sqlite3_finalize(pstmt)
+        
         return comments
     }
     
