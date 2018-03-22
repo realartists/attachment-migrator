@@ -146,7 +146,7 @@ class ShipDB {
     
     deinit {
         if (db != nil) {
-            sqlite3_close_v2(db)
+            sqlite3_close(db)
         }
     }
     
