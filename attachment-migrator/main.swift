@@ -530,9 +530,8 @@ class DropboxMigrator : AttachmentMigrator {
 //
 
 func usage() {
-    let name = ProcessInfo.processInfo.arguments.first ?? "attachment-migrator/main.swift"
     print("""
-        Usage: swift \(name) -github-token <token> [-dropbox-token <token>] [-transfer-script '<command>']
+        Usage: attachment-migrator/main.swift -github-token <token> [-dropbox-token <token>] [-transfer-script '<command>']
         
         Guide to Arguments:
         
@@ -614,6 +613,7 @@ for migratable in allMigratable {
             failure += 1
         }
     }
+    break
 }
 
 print("\n\n*** Migrated \(success) item(s) with \(failure) failure(s).")
