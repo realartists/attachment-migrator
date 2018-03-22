@@ -37,11 +37,11 @@ Guide to Arguments:
 
 ### For Dropbox
 
-3. `swift attachment-migrator/main.swift -github-token <token> -dropbox-token <token>`
+4a. `swift attachment-migrator/main.swift -github-token <token> -dropbox-token <token>`
 
 ### For other hosts
 
-4. `swift attachment-migrator/main.swift -github-token <token> -transfer-script '/path/to/script [arg1] [arg2] [...argN]'`
+4b. `swift attachment-migrator/main.swift -github-token <token> -transfer-script '/path/to/script [arg1] [arg2] [...argN]'`
 
 **Note:** When the transfer-script is actually run, it will have appended to its argument list the src URL (on shipusercontent.com) that is to be migrated. 
 
