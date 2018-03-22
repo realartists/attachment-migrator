@@ -613,7 +613,6 @@ for migratable in allMigratable {
             failure += 1
         }
     }
-    break
 }
 
 print("\n\n*** Migrated \(success) item(s) with \(failure) failure(s).")
