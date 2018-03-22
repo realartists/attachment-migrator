@@ -33,6 +33,53 @@ extension Data {
     }
 }
 
+struct APIResponse<T:Codable> {
+    var value:T
+    var http:HTTPURLResponse
+}
+
+extension URLRequest {
+    func executeAPIRequest<Response:Codable>() throws -> APIResponse<Response> {
+        let sema = DispatchSemaphore(value:0);
+        let session = URLSession.shared;
+        var outerError:Error? = nil
+        var outerResponse:HTTPURLResponse? = nil
+        var result:Response? = nil
+        
+        session.dataTask(with: self) { (data, response, httpError) in
+            outerResponse = response as? HTTPURLResponse
+            let statusCode = response != nil ? (response as! HTTPURLResponse).statusCode : 0
+            if (httpError != nil) {
+                outerError = httpError
+            } else if (statusCode < 200 || statusCode >= 400) {
+                let msg = "\(self.url!): HTTP error \(statusCode)" + (data != nil ? (" " + String(data:data!, encoding:.utf8)!) : "")
+                outerError = NSError.init(domain: NSURLErrorDomain, code: URLError.Code.init(rawValue: (response as! HTTPURLResponse).statusCode).rawValue, userInfo: [NSLocalizedDescriptionKey : msg])
+            } else {
+                do {
+                    result = try JSONDecoder().decode(Response.self, from: data!)
+                } catch {
+                    outerError = error
+                }
+            }
+            
+            sema.signal()
+        }.resume()
+        
+        sema.wait()
+        
+        if (outerError != nil) {
+            throw outerError!
+        }
+        
+        return APIResponse<Response>(value:result!, http:outerResponse!)
+    }
+}
+
+extension String {
+    func wholeNSRange() -> NSRange {
+        return NSMakeRange(0, self.count)
+    }
+}
 
 /* For interacting with GitHub REST API */
 class GitHubAPI {
@@ -42,135 +89,26 @@ class GitHubAPI {
         self.token = token
     }
     
-    func urlComponents(_ endpoint:String, _ params:Dictionary<String, String>? = nil) -> URLComponents {
-        var comps:URLComponents;
-        if endpoint.starts(with: "https://") {
-            comps = URLComponents.init(string: endpoint)!
-        } else {
-            var path = endpoint
-            if (!endpoint.starts(with: "/")) {
-                path = "/\(endpoint)"
-            }
-            comps = URLComponents.init()
-            comps.scheme = "https"
-            comps.host = "api.github.com"
-            comps.path = path
-        }
-        
-        if (params != nil) {
-            comps.queryItems = params!.flatMap() { (key, value) in URLQueryItem.init(name: key, value: value) }
-        }
-        
-        return comps
+    struct Patch : Codable {
+        let body:String
     }
     
-    func headers() -> Dictionary<String, String> {
-        return ["Authorization": "token \(self.token)",
-                "User-Agent": "realartists",
-                "Accept": "application/json"];
+    func patch(endpoint:String, body:String) throws -> Void {
+        var req = URLRequest(url: URL(string:"https://api.github.com/\(endpoint)")!)
+        req.httpMethod = "PATCH"
+        req.allHTTPHeaderFields = ["Content-Type": "application/json", "Authorization": "token \(self.token)", "Accept": "application/json"]
+        req.httpBody = try JSONEncoder().encode(Patch(body:body))
+        
+        let _:APIResponse<Patch> = try req.executeAPIRequest()
     }
     
-    func postHeaders() -> Dictionary<String, String> {
-        return self.headers().merging(["Content-Type": "application/json"]) { (_, new) in new }
-    }
-    
-    struct GetResponse<T> {
-        var value:T;
-        var response:HTTPURLResponse;
+    func get<Response:Codable>(endpoint:String) throws -> APIResponse<Response> {
+        var req = URLRequest(url: URL(string:"https://api.github.com/\(endpoint)")!)
+        req.httpMethod = "GET"
+        req.allHTTPHeaderFields = ["Content-Type": "application/json", "Authorization": "token \(self.token)", "Accept": "application/json"]
         
-        init(_ value:T, _ response:HTTPURLResponse) {
-            self.value = value;
-            self.response = response;
-        }
-    }
-    
-    func get<T:Codable>(_ endpoint:String, params:Dictionary<String, String>? = nil, headers:Dictionary<String, String>? = nil) throws -> GetResponse<T> {
-        
-        var allHeaders = self.headers()
-        if (headers != nil) {
-            allHeaders = allHeaders.merging(headers!) { (_, new) in new }
-        }
-        
-        let comps = self.urlComponents(endpoint, params)
-        
-        var request = URLRequest(url: comps.url!)
-        request.allHTTPHeaderFields = allHeaders
-        
-        let sema = DispatchSemaphore(value:0);
-        let session = URLSession.shared;
-        var outerError:Error? = nil
-        var result:T? = nil
-        var outerResponse:URLResponse? = nil
-        session.dataTask(with: request) { (data, response, innerErr) in
-            
-            outerResponse = response;
-            
-            if (innerErr != nil) {
-                outerError = innerErr;
-            } else if (response != nil && !(200..<400).contains((response as! HTTPURLResponse).statusCode)) {
-                outerError = NSError.init(domain: NSURLErrorDomain, code: URLError.Code.init(rawValue: (response as! HTTPURLResponse).statusCode).rawValue, userInfo: nil)
-            }
-            
-            if (outerError == nil) {
-                let decoder = JSONDecoder()
-                do {
-                    result = try decoder.decode(T.self, from:data!);
-                } catch {
-                    outerError = error;
-                }
-            }
-            
-            sema.signal();
-        }.resume()
-        
-        sema.wait();
-        
-        if (outerError != nil) {
-            throw outerError!;
-        }
-        
-        return GetResponse(result!, outerResponse as! HTTPURLResponse)
-    }
-    
-    func _getPaged<T:Codable>(endpoint:String, params:Dictionary<String, String>? = nil, headers:Dictionary<String, String>? = nil) throws -> [GetResponse<T>] {
-        
-        var current = endpoint
-        
-        var all:[GetResponse<T>] = []
-        while (true) {
-            let result:GetResponse<T> = try self.get(endpoint, params:params, headers:headers)
-            all.append(result)
-            
-            var next = ""
-            if let link:String = (result.response.allHeaderFields["Link"] as? String) {
-                let parts = link.components(separatedBy: ", ")
-                next = parts.first ?? current
-            } else {
-                next = current
-            }
-            
-            if (next == current) {
-                break
-            } else {
-                current = next
-            }
-        }
-        
-        return all
-    }
-    
-    func getPaged<T:Codable>(endpoint:String, params:Dictionary<String, String>? = nil, headers:Dictionary<String, String>? = nil) throws -> [T] {
-        let pages:[GetResponse<T>] = try self._getPaged(endpoint:endpoint, params:params, headers:headers)
-        return pages.flatMap() { $0.value }
-    }
-    
-    struct WindowedResult<T:Codable> : Codable {
-        var items:[T]
-    }
-    
-    func getWindowPaged<T:Codable>(endpoint:String, params:Dictionary<String, String>? = nil, headers:Dictionary<String, String>? = nil) throws -> [T] {
-        let windows:[GetResponse<WindowedResult<T>>] = try self._getPaged(endpoint:endpoint, params:params, headers:headers)
-        return windows.flatMap() { $0.value.items }
+        let response:APIResponse<Response> = try req.executeAPIRequest()
+        return response
     }
     
     struct User : Codable {
@@ -180,11 +118,19 @@ class GitHubAPI {
     }
     
     func user() throws -> User {
-        var resp:GetResponse<User> = try self.get("/user")
-        let scopes = (resp.response.allHeaderFields["X-OAuth-Scopes"] as? String)?.components(separatedBy: ", ")
-        resp.value.oauthScopes = scopes
-        return resp.value
+        var response:APIResponse<User> = try self.get(endpoint:"user")
+        let scopes = (response.http.allHeaderFields["X-OAuth-Scopes"] as? String)?.components(separatedBy: ", ")
+        response.value.oauthScopes = scopes
+        return response.value
     }
+}
+
+// Represents types of GitHub objects that we can migrate attachments for
+protocol Migratable {
+    func url() -> URL
+    func patchEndpoint() -> String
+    
+    var body:String { get }
 }
 
 // For interacting with ship.db
@@ -204,7 +150,7 @@ class ShipDB {
         }
     }
     
-    struct Issue {
+    struct Issue : Migratable {
         let id:Int
         let number:Int
         let body:String
@@ -213,6 +159,10 @@ class ShipDB {
         
         func url() -> URL {
             return URL(string: "https://github.com/\(repoFullName)/issues/\(number)")!
+        }
+        
+        func patchEndpoint() -> String {
+            return "repos/\(repoFullName)/issues/\(number)"
         }
     }
     
@@ -236,8 +186,8 @@ class ShipDB {
     func issuesToBeMigrated(authoredBy:String?) -> [Issue] {
         let sql = """
 SELECT ZLOCALISSUE.ZIDENTIFIER,
-       ZLOCALISSUE.ZBODY,
        ZLOCALISSUE.ZNUMBER,
+       ZLOCALISSUE.ZBODY,
        ZLOCALACCOUNT.ZIDENTIFIER,
        ZLOCALACCOUNT.ZLOGIN,
        ZLOCALREPO.ZFULLNAME
@@ -266,7 +216,7 @@ SELECT ZLOCALISSUE.ZIDENTIFIER,
         return issues
     }
     
-    struct Comment {
+    struct Comment : Migratable {
         let id:Int
         let body:String
         let issueNumber:Int
@@ -284,7 +234,16 @@ SELECT ZLOCALISSUE.ZIDENTIFIER,
             case .Issue:
                 return URL(string: "https://github.com/\(repoFullName)/issues/\(issueNumber)#issuecomment-\(id)")!
             case .Review:
-                return URL(string: "https://github.com/\(repoFullName)/pull/\(issueNumber)#discussion-r\(id)")!
+                return URL(string: "https://github.com/\(repoFullName)/pull/\(issueNumber)#discussion_r\(id)")!
+            }
+        }
+        
+        func patchEndpoint() -> String {
+            switch type {
+            case .Issue:
+                return "repos/\(repoFullName)/issues/comments/\(id)"
+            case .Review:
+                return "repos/\(repoFullName)/pulls/comments/\(id)"
             }
         }
     }
@@ -330,6 +289,7 @@ SELECT \(table).ZIDENTIFIER,
     }
 }
 
+// Abstract base class of all attachment migrators. Handles actually moving attachments from shipusercontent.com to elsewhere.
 class AttachmentMigrator {
     func validateMigration(src:String, dst:String) throws -> Void {
         let srcURL = URL(string:src)
@@ -385,23 +345,27 @@ class AttachmentMigrator {
         fatalError("migrate(url:) must be implemented")
     }
     
-    func migrate(body:String) throws -> String {
+    func migrate(body:String) throws -> (String, [String: String]) {
         let re = try NSRegularExpression(pattern: "https://shipusercontent.com/[a-f0-9]{32}/[^\\s'\"\\)]+", options: NSRegularExpression.Options(rawValue:0))
-        let matches = re.matches(in: body, options: NSRegularExpression.MatchingOptions(rawValue:0), range:NSRangeFromString(body))
+        let matches = re.matches(in: body, options: NSRegularExpression.MatchingOptions(rawValue:0), range:body.wholeNSRange())
         
         var migrated = String(body)
-        try matches.reversed().forEach { (match) in
+        var urls = [String: String]()
+        for match in matches.reversed() {
             let bodyRange = Range(match.range(at: 0), in:body)!
             let src = String(body[bodyRange])
             let dst = try migrate(url:src)
             
             migrated.replaceSubrange(bodyRange, with: dst)
+            
+            urls[src] = dst
         }
         
-        return migrated
+        return (migrated, urls)
     }
 }
-    
+
+// Subclass of AttachmentMigrator that shells out to a subprocess to do attachment migration
 class ShellMigrator : AttachmentMigrator {
     let shell:String
     
@@ -414,19 +378,22 @@ class ShellMigrator : AttachmentMigrator {
         let task = Process()
         task.launchPath = "/bin/bash"
         task.arguments = ["-c", command]
-        let outputPipe = Pipe()
-        task.standardOutput = outputPipe
-        task.standardError = outputPipe
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        task.standardOutput = stdoutPipe
+        task.standardError = stderrPipe
         try task.run()
-        let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
         task.waitUntilExit()
-        let outputStr = String(data:output, encoding:.utf8) ?? ""
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        let stdoutStr = String(data:stdoutData, encoding:.utf8) ?? ""
+        let stderrStr = String(data:stderrData, encoding:.utf8) ?? ""
         
         if (task.terminationStatus != 0) {
-            throw NSError.init(domain: "shell", code: Int(task.terminationStatus), userInfo: [NSLocalizedDescriptionKey: outputStr])
+            throw NSError.init(domain: "shell", code: Int(task.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderrStr])
         }
         
-        let dst = outputStr.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        let dst = stdoutStr.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
         
         try validateMigration(src:url, dst:dst)
         
@@ -434,44 +401,12 @@ class ShellMigrator : AttachmentMigrator {
     }
 }
 
+// AttachmentMigrator subclass that rehosts attachments on Dropbox
 class DropboxMigrator : AttachmentMigrator {
     let token:String
     
     init(token:String) {
         self.token = token
-    }
-    
-    func execute<Response:Codable>(_ req:URLRequest) throws -> Response {
-        let sema = DispatchSemaphore(value:0);
-        let session = URLSession.shared;
-        var outerError:Error? = nil
-        var result:Response? = nil
-        
-        session.dataTask(with: req) { (data, response, httpError) in
-            let statusCode = response != nil ? (response as! HTTPURLResponse).statusCode : 0
-            if (httpError != nil) {
-                outerError = httpError
-            } else if (statusCode < 200 || statusCode >= 400) {
-                let msg = "\(req.url!): HTTP error \(statusCode)" + (data != nil ? (" " + String(data:data!, encoding:.utf8)!) : "")
-                outerError = NSError.init(domain: NSURLErrorDomain, code: URLError.Code.init(rawValue: (response as! HTTPURLResponse).statusCode).rawValue, userInfo: [NSLocalizedDescriptionKey : msg])
-            } else {
-                do {
-                    result = try JSONDecoder().decode(Response.self, from: data!)
-                } catch {
-                    outerError = error
-                }
-            }
-            
-            sema.signal()
-            }.resume()
-        
-        sema.wait()
-        
-        if (outerError != nil) {
-            throw outerError!
-        }
-        
-        return result!
     }
     
     struct UploadRequest : Codable {
@@ -488,15 +423,15 @@ class DropboxMigrator : AttachmentMigrator {
     }
     
     func upload(data:Data, args:UploadRequest) throws -> UploadResponse {
-        var req = URLRequest(url:URL(string:"https://api.dropboxapi.com/2/files/upload")!)
+        var req = URLRequest(url:URL(string:"https://content.dropboxapi.com/2/files/upload")!)
         req.httpMethod = "POST"
         let argStr = try String(data:JSONEncoder().encode(args), encoding:.utf8)!
         req.allHTTPHeaderFields = ["Authorization": "Bearer \(self.token)", "Content-Type": "application/octet-stream", "Dropbox-API-Arg": argStr]
         req.httpBody = data
         
-        let response:UploadResponse = try execute(req)
+        let response:APIResponse<UploadResponse> = try req.executeAPIRequest()
         
-        return response
+        return response.value
     }
     
     func api<Request:Codable, Response:Codable>(endpoint:String, request:Request) throws -> Response {
@@ -505,16 +440,18 @@ class DropboxMigrator : AttachmentMigrator {
         req.allHTTPHeaderFields = ["Authorization": "Bearer \(self.token)", "Content-Type": "application/json"]
         req.httpBody = try JSONEncoder().encode(request)
         
-        let response:Response = try execute(req)
-        return response
+        let response:APIResponse<Response> = try req.executeAPIRequest()
+        return response.value
     }
     
     func download(_ srcURL:URL) throws -> Data {
         let sema = DispatchSemaphore(value:0);
         let session = URLSession.shared;
         var result:Data? = nil
+        var outerError:Error? = nil
         
         session.dataTask(with: srcURL) { (data, response, httpError) in
+            outerError = httpError
             if ((response as? HTTPURLResponse)?.statusCode == 200) {
                 result = data
             }
@@ -523,11 +460,24 @@ class DropboxMigrator : AttachmentMigrator {
         
         sema.wait()
         
-        if (result != nil) {
-            throw NSError.init(domain: "migrator", code: 0, userInfo: [NSLocalizedDescriptionKey:"Cannot download \(srcURL)"])
+        if (result == nil) {
+            let reason = outerError?.localizedDescription ?? ""
+            throw NSError.init(domain: "migrator", code: 0, userInfo: [NSLocalizedDescriptionKey:"Cannot download \(srcURL): \(reason)"])
         }
         
         return result!
+    }
+    
+    struct ListSharedLinksRequest : Codable {
+        let path:String
+        let direct_only:Bool
+    }
+    
+    struct ListSharedLinksResponse : Codable {
+        struct Link : Codable {
+            let url:String
+        }
+        let links:[Link]
     }
     
     struct ShareLinkRequest : Codable {
@@ -543,6 +493,11 @@ class DropboxMigrator : AttachmentMigrator {
     }
     
     func share(_ path:String) throws -> String {
+        let sharedAlready:ListSharedLinksResponse = try api(endpoint: "sharing/list_shared_links", request:ListSharedLinksRequest(path:path, direct_only:true))
+        if (sharedAlready.links.count > 0) {
+            return sharedAlready.links.first!.url
+        }
+        
         let response:ShareLinkResponse = try api(endpoint: "sharing/create_shared_link_with_settings", request: ShareLinkRequest(path:path, settings:ShareLinkRequest.Settings(requested_visibility:"public")))
         return response.url
     }
@@ -555,7 +510,16 @@ class DropboxMigrator : AttachmentMigrator {
         
         let contents = try download(srcURL!)
         let uploadResponse = try upload(data: contents, args: UploadRequest(path: srcURL!.path, mode: "add", autorename: true))
-        let shareURLStr = try share(uploadResponse.path_display)
+        var shareURLStr = try share(uploadResponse.id)
+        if (shareURLStr.hasSuffix(".mov?dl=0")) {
+            let start = shareURLStr.index(shareURLStr.endIndex, offsetBy: -("?dl=0".count))
+            let end = shareURLStr.endIndex
+            shareURLStr.replaceSubrange(start..<end, with: "?dl=1")
+        } else if (shareURLStr.hasSuffix("?dl=0")) {
+            let start = shareURLStr.index(shareURLStr.endIndex, offsetBy: -("?dl=0".count))
+            let end = shareURLStr.endIndex
+            shareURLStr.replaceSubrange(start..<end, with: "?raw=1")
+        }
         
         return shareURLStr
     }
@@ -574,13 +538,11 @@ func usage() {
         
         \t-github-token: A GitHub personal access token created at https://github.com/settings/tokens, with repo scope.
         \t-dropbox-token: A Dropbox OAuth token, created at https://www.dropbox.com/developers/apps/create.
-        \t-transfer-script: A command, to be executed with the default shell, that takes as its last argument the URL of an attachment to be migrated, and which prints out the migrated URL to stdout on success. Either -dropbox-token or -transfer-script must be specified.
-        \t-dry-run: YES or NO. Just print GitHub URLs of issues and comments that need to be migrated, but don't actually modify anything. Default NO.
-        \t-everyone: YES or NO. Attempt to migrate all issues/PRs/comments with shipusercontent.com attachments, regardless of their authors. Default NO.
+        \t-transfer-script: A command, to be executed with /bin/bash, that takes as its last argument the URL of an attachment to be migrated, and which prints out the migrated URL to stdout on success. Either -dropbox-token or -transfer-script must be specified.
+        \t-dry-run: YES or NO. If YES, just print GitHub URLs of issues and comments that need to be migrated, but don't actually modify anything. If NO, actually update the issues and comments on github.com. Default NO.
+        \t-everyone: YES or NO. If YES, attempt to migrate all issues/PRs/comments with shipusercontent.com attachments, regardless of their authors -- this may not succeed if you do not have permission to edit other author's issues/comments. If NO, will only attempt to edit issues/comments which you have authored. Default NO.
         """)
 }
-
-print("Args: \(ProcessInfo.processInfo.arguments)")
 
 // Parse and Validate Command Line Arguments
 let githubToken = UserDefaults.standard.string(forKey: "github-token")
@@ -595,10 +557,10 @@ if githubToken == nil || (dropboxToken == nil && transferScript == nil) {
 }
 
 // Initialize and Validate GitHub API access
-let api = GitHubAPI(githubToken!)
+let github = GitHubAPI(githubToken!)
 let user:GitHubAPI.User
 do {
-    user = try api.user()
+    user = try github.user()
     if (user.oauthScopes == nil || !user.oauthScopes!.contains("repo")) {
         print("GitHub Token does not contain 'repo' scope. Use a different token.")
         exit(1)
@@ -623,21 +585,35 @@ do {
 // Discover issue / PRs with bodies that need to be migrated
 let author = everyone ? nil : user.login
 let issues = db.issuesToBeMigrated(authoredBy: author)
-print("Discovered issues \(issues)")
 
 // Discover issue comments that need to be migrated
 let issueComments = db.issueCommentsToBeMigrated(authoredBy: author)
 let reviewComments = db.reviewCommentsToBeMigrated(authoredBy: author)
 
+let allMigratable:[Migratable] = issues as [Migratable] + issueComments as [Migratable] + reviewComments as [Migratable]
+
+print("*** Will migrate \(allMigratable.count) items\n")
+
 // Migrate (or just iterate and print if dryRun)
 let migrator = dropboxToken != nil ? DropboxMigrator(token:dropboxToken!) : ShellMigrator(shell:transferScript!)
-for issue in issues {
-    print("\(issue.url())")
+var success = 0
+var failure = 0
+for migratable in allMigratable {
+    print("\(migratable.url())")
     if (!dryRun) {
         do {
-            let newBody = try migrator.migrate(body: issue.body)
+            let (newBody, urls) = try migrator.migrate(body: migratable.body)
+            try github.patch(endpoint: migratable.patchEndpoint(), body: newBody)
+            
+            for (src, dst) in urls {
+                print("\t\(src) => \(dst)")
+            }
+            success += 1
         } catch {
             print("Migration failed: \(error)")
+            failure += 1
         }
     }
 }
+
+print("\n\n*** Migrated \(success) item(s) with \(failure) failure(s).")
